@@ -20,4 +20,5 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ONE_SHOT: ${{ secrets.ONE_SHOT }}
         run: python sentiment.py
