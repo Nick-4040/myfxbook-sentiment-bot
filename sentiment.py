@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-Myfxbook Community Outlook Alarm + Telegram Bot
-
-- Usa API Myfxbook per prendere il sentiment
-- Invia alert su Telegram se LONG% o SHORT% >= soglia
-- Funziona in modalità ONE_SHOT su GitHub Actions
+Myfxbook Community Outlook Alarm + Multi-utente Telegram Bot con selezione pair
 """
 
 from __future__ import annotations
 import os
 import json
+import time
 import urllib.request
 import urllib.parse
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
@@ -20,13 +16,17 @@ from typing import Dict, Optional
 # --- CONFIG ---
 BASE_URL = "https://www.myfxbook.com/api"
 DEFAULT_THRESHOLD = 65.0
+CHAT_DB_FILE = "users.json"  # Salva {chat_id: [pair1,pair2,...]}
 
-# Telegram (da GitHub Secrets)
+# Telegram
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+URL_TELEGRAM = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# ONE_SHOT = True su GitHub Actions
 ONE_SHOT = os.environ.get("ONE_SHOT", "false").lower() == "true"
+
+# Myfxbook credentials
+MYFXBOOK_EMAIL = os.environ.get("MYFXBOOK_EMAIL")
+MYFXBOOK_PASSWORD = os.environ.get("MYFXBOOK_PASSWORD")
 
 # --- DATACLASS ---
 @dataclass(frozen=True)
@@ -34,6 +34,18 @@ class SentimentSnapshot:
     symbol: str
     long_pct: float
     short_pct: float
+
+# --- MAPPA BANDIERE ---
+CURRENCY_FLAGS = {
+    "USD": "🇺🇸", "EUR": "🇪🇺", "GBP": "🇬🇧",
+    "JPY": "🇯🇵", "CHF": "🇨🇭", "AUD": "🇦🇺",
+    "CAD": "🇨🇦", "NZD": "🇳🇿"
+}
+
+def pair_flags(pair):
+    if len(pair) != 6:
+        return ""
+    return CURRENCY_FLAGS.get(pair[:3], "") + CURRENCY_FLAGS.get(pair[3:], "")
 
 # --- MYFXBOOK CLIENT ---
 class MyfxbookClient:
@@ -77,17 +89,29 @@ class MyfxbookClient:
             return json.loads(body or "{}")
 
 # --- TELEGRAM ---
-def send_telegram(message: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram token o chat ID mancanti")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode":"HTML"}
+def load_users():
+    if os.path.exists(CHAT_DB_FILE):
+        with open(CHAT_DB_FILE,"r") as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    with open(CHAT_DB_FILE,"w") as f:
+        json.dump(users,f)
+
+def get_updates(offset=None):
+    params = {"timeout": 30}
+    if offset: params["offset"] = offset
+    url = f"{URL_TELEGRAM}/getUpdates?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=35) as resp:
+        return json.load(resp)
+
+def send_message(chat_id, text):
+    url = f"{URL_TELEGRAM}/sendMessage"
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode":"HTML"}).encode()
     try:
-        import requests
-        r = requests.post(url, data=payload, timeout=10)
-        if r.status_code != 200:
-            print("Errore invio Telegram:", r.text)
+        with urllib.request.urlopen(url, data=data, timeout=10) as resp:
+            return resp.read()
     except Exception as e:
         print("Errore invio Telegram:", e)
 
@@ -108,42 +132,85 @@ def now_stamp():
 
 # --- MAIN ---
 def main():
-    email = os.environ.get("MYFXBOOK_EMAIL")
-    password = os.environ.get("MYFXBOOK_PASSWORD")
-    if not email or not password:
-        print("Imposta MYFXBOOK_EMAIL e MYFXBOOK_PASSWORD nei secrets")
+    if not TELEGRAM_TOKEN or not MYFXBOOK_EMAIL or not MYFXBOOK_PASSWORD:
+        print("Imposta TELEGRAM_TOKEN, MYFXBOOK_EMAIL, MYFXBOOK_PASSWORD")
         return
 
-    client = MyfxbookClient(email, password)
+    users = load_users()  # dict chat_id -> [pair,...]
+    client = MyfxbookClient(MYFXBOOK_EMAIL, MYFXBOOK_PASSWORD)
     last_state: Dict[str,str] = {}
+    last_update_id = None
 
     try:
         while True:
             stamp = now_stamp()
+            # --- Legge messaggi Telegram ---
+            try:
+                updates = get_updates(last_update_id)
+                for u in updates.get("result", []):
+                    last_update_id = u["update_id"] + 1
+                    chat_id = str(u["message"]["chat"]["id"])
+                    text = u["message"]["text"].strip()
+
+                    if chat_id not in users:
+                        users[chat_id] = []
+
+                    # Comandi
+                    if text.startswith("/"):
+                        parts = text.split()
+                        cmd = parts[0].lower()
+                        arg = parts[1].upper() if len(parts)>1 else None
+
+                        if cmd=="/start":
+                            send_message(chat_id, "Benvenuto! Usa /pairs per vedere tutti i pair disponibili.")
+                        elif cmd=="/pairs":
+                            try:
+                                sentiments = client.get_outlook()
+                                msg = "Tutti i pair disponibili:\n"
+                                for p in sentiments.keys():
+                                    msg += f"{p} {pair_flags(p)}\n"
+                                send_message(chat_id, msg)
+                            except: send_message(chat_id, "Errore lettura pair Myfxbook")
+                        elif cmd=="/add" and arg:
+                            if arg not in users[chat_id]:
+                                users[chat_id].append(arg)
+                                save_users(users)
+                                send_message(chat_id, f"{arg} aggiunto {pair_flags(arg)}")
+                        elif cmd=="/remove" and arg:
+                            if arg in users[chat_id]:
+                                users[chat_id].remove(arg)
+                                save_users(users)
+                                send_message(chat_id, f"{arg} rimosso {pair_flags(arg)}")
+                        elif cmd=="/mylist":
+                            msg = "I tuoi pair monitorati:\n" + "\n".join([f"{p} {pair_flags(p)}" for p in users.get(chat_id,[])])
+                            send_message(chat_id, msg)
+                        continue
+                    # Risposta generica
+                    send_message(chat_id, f"Hai scritto: {text}\nUsa /pairs, /add, /remove, /mylist")
+            except Exception as e:
+                print(f"{stamp} Telegram fetch error: {e}")
+
+            # --- Legge sentiment Myfxbook ---
             try:
                 sentiments = client.get_outlook()
-                alerts = []
-                for sym, snap in sentiments.items():
-                    cur = classify_state(snap)
-                    prev = last_state.get(sym,"NONE")
-                    last_state[sym] = cur
-                    if cur != "NONE" and cur != prev:
-                        alerts.append((sym,snap.long_pct,snap.short_pct,cur,prev))
-                if alerts:
-                    message = f"📊 <b>Myfxbook Alert</b>\nOra: {stamp}\n\n"
-                    for sym,lp,sp,cur,prev in alerts:
-                        reason = "ENTRY" if prev=="NONE" else f"FLIP {prev}→{cur}"
-                        message += f"{sym}: long={lp:.1f}% short={sp:.1f}% → {state_action(cur)} [{reason}]\n"
-                    send_telegram(message)
-                else:
-                    print(f"{stamp} Nessun nuovo alert")
+                for uid, user_pairs in users.items():
+                    msg = ""
+                    for sym, snap in sentiments.items():
+                        if sym not in user_pairs: continue
+                        state = classify_state(snap)
+                        prev = last_state.get(f"{uid}_{sym}", "NONE")
+                        last_state[f"{uid}_{sym}"] = state
+                        if state != "NONE" and state != prev:
+                            msg += f"{sym} {pair_flags(sym)}: long={snap.long_pct}% short={snap.short_pct}% → {state_action(state)}\n"
+                    if msg:
+                        send_message(uid, f"📊 <b>Myfxbook Alert</b>\n{stamp}\n\n{msg}")
+                print(f"{stamp} Check completato")
             except Exception as e:
-                print(f"{stamp} ERRORE: {e}")
+                print(f"{stamp} Myfxbook error: {e}")
 
             if ONE_SHOT:
                 break
             time.sleep(15*60)
-
     finally:
         client.logout()
 
