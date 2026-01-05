@@ -1,0 +1,1 @@
+# myfxbook-sentiment-bot
