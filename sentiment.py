@@ -1,48 +1,62 @@
 import requests
+import json
 import os
 from datetime import datetime
 
-
+# URL Myfxbook
 MYFXBOOK_URL = "https://www.myfxbook.com/api/get-community-outlook.json"
 THRESHOLD = 65
 
+# Prendere i secrets da GitHub Actions
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# Funzioni per leggere i pair
+def load_pairs():
+    try:
+        with open("pairs.json", "r") as f:
+            return json.load(f).get("pairs", [])
+    except Exception as e:
+        print("Errore nel leggere pairs.json:", e)
+        return []
 
-print("TOKEN presente:", TELEGRAM_TOKEN is not None)
-print("CHAT ID:", CHAT_ID)
-
-
+# Funzione per inviare messaggio Telegram
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={
+    r = requests.post(url, json={
         "chat_id": CHAT_ID,
-        "text": msg
+        "text": msg,
+        "parse_mode": "HTML"
     })
+    print("Telegram response:", r.text)  # utile per debug GitHub
 
-def main():
-    r = requests.get(MYFXBOOK_URL, timeout=10)
-    data = r.json()
-
-    pair = "EURUSD"  # per ora fisso, poi lo renderemo dinamico
-
-    if pair not in data:
+# Funzione principale
+def check_sentiment():
+    try:
+        r = requests.get(MYFXBOOK_URL, timeout=10)
+        data = r.json()
+    except Exception as e:
+        print("Errore nel leggere Myfxbook:", e)
         return
 
-    long_p = data[pair]["longPercentage"]
-    short_p = data[pair]["shortPercentage"]
+    pairs = load_pairs()
+    if not pairs:
+        print("Nessun pair da controllare.")
+        return
 
-    if long_p >= THRESHOLD or short_p >= THRESHOLD:
-        direction = "BUY" if long_p >= THRESHOLD else "SELL"
-        value = long_p if direction == "BUY" else short_p
+    for pair in pairs:
+        if pair not in data:
+            print(f"Pair {pair} non trovato in Myfxbook")
+            continue
 
-        msg = (
-            f"{pair}\n"
-            f"{direction} {value:.1f}%\n"
-            f"{datetime.utcnow().strftime('%H:%M UTC')}"
-        )
-        send_telegram(msg)
+        long_p = data[pair].get("longPercentage", 0)
+        short_p = data[pair].get("shortPercentage", 0)
 
-if __name__ == "__main__":
-    main()
+        # Alert solo se supera la soglia
+        if long_p >= THRESHOLD or short_p >= THRESHOLD:
+            direction = "BUY" if long_p >= THRESHOLD else "SELL"
+            value = long_p if direction == "BUY" else short_p
+
+            msg = (
+                f"📊 <b>{pair}</b>\n"
+                f"Direzione: <b>{direc
