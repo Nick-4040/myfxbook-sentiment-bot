@@ -59,4 +59,11 @@ def check_sentiment():
 
             msg = (
                 f"📊 <b>{pair}</b>\n"
-                f"Direzione: <b>{direc
+                f"Direzione: <b>{direction}</b>\n"
+                f"Sentiment: <b>{value:.1f}%</b>\n"
+                f"Ora: {datetime.utcnow().strftime('%H:%M UTC')}"
+            )
+            send_telegram(msg)
+
+if __name__ == "__main__":
+    check_sentiment()
