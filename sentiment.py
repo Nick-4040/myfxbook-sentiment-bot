@@ -1,245 +1,203 @@
 #!/usr/bin/env python3
 """
-Myfxbook Community Outlook Alarm + Multi-utente Telegram Bot con selezione pair
+Bot Myfxbook Community Outlook + Telegram
+
+Funzionalità:
+- Legge il sentiment da Myfxbook
+- Invia alert per pair sopra soglia
+- Bot Telegram interattivo con comandi:
+  /pairs  - lista pair disponibili con bandiere
+  /add    - aggiunge pair alla lista dell'utente
+  /remove - rimuove pair dalla lista
+  /mylist - mostra pair dell'utente
 """
 
 from __future__ import annotations
 import os
-import json
+import sys
 import time
-import urllib.request
+import json
+import getpass
 import urllib.parse
-import requests
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
+import requests
 
-# --- CONFIG ---
-BASE_URL = "https://www.myfxbook.com/api"
+# -------------------- CONFIG --------------------
 DEFAULT_THRESHOLD = 65.0
-CHAT_DB_FILE = "users.json"  # Salva {chat_id: [pair1,pair2,...]}
-
-# Telegram
+BASE_URL = "https://www.myfxbook.com/api"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-URL_TELEGRAM = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-ONE_SHOT = os.environ.get("ONE_SHOT", "false").lower() == "true"
-
-# Myfxbook credentials
 MYFXBOOK_EMAIL = os.environ.get("MYFXBOOK_EMAIL")
 MYFXBOOK_PASSWORD = os.environ.get("MYFXBOOK_PASSWORD")
+ONE_SHOT = os.environ.get("ONE_SHOT", "true").lower() == "true"
 
-# --- DATACLASS ---
+# utenti -> dict chat_id: [pair1, pair2, ...]
+USER_PAIRS: Dict[int, List[str]] = {}
+
+# lista pair disponibili e bandiere
+PAIR_FLAGS = {
+    "EURUSD": "🇪🇺🇺🇸",
+    "GBPUSD": "🇬🇧🇺🇸",
+    "USDJPY": "🇺🇸🇯🇵",
+    "AUDUSD": "🇦🇺🇺🇸",
+    "USDCAD": "🇺🇸🇨🇦",
+    "USDCHF": "🇺🇸🇨🇭",
+    "NZDUSD": "🇳🇿🇺🇸",
+}
+
+# -------------------- DATACLASS --------------------
 @dataclass(frozen=True)
 class SentimentSnapshot:
     symbol: str
     long_pct: float
     short_pct: float
 
-# --- MAPPA BANDIERE ---
-CURRENCY_FLAGS = {
-    "USD": "🇺🇸", "EUR": "🇪🇺", "GBP": "🇬🇧",
-    "JPY": "🇯🇵", "CHF": "🇨🇭", "AUD": "🇦🇺",
-    "CAD": "🇨🇦", "NZD": "🇳🇿"
-}
-
-def pair_flags(pair):
-    if len(pair) != 6:
-        return ""
-    return CURRENCY_FLAGS.get(pair[:3], "") + CURRENCY_FLAGS.get(pair[3:], "")
-
-# --- MYFXBOOK CLIENT ---
+# -------------------- MYFXBOOK CLIENT --------------------
 class MyfxbookClient:
     def __init__(self, email: str, password: str):
         self.email = email
         self.password = password
         self.session_id: Optional[str] = None
 
-    def login(self):
+    def login(self) -> str:
         url = f"{BASE_URL}/login.json?email={urllib.parse.quote(self.email)}&password={urllib.parse.quote(self.password)}"
         payload = self._get_json(url)
         if payload.get("error"):
-            raise Exception("Login failed: " + str(payload.get("message")))
-        self.session_id = urllib.parse.unquote(payload.get("session"))
-
-    def logout(self):
-        if self.session_id:
-            url = f"{BASE_URL}/logout.json?session={urllib.parse.quote(self.session_id)}"
-            try: self._get_json(url)
-            except: pass
-            self.session_id = None
+            raise Exception(f"Myfxbook login error: {payload.get('message')}")
+        session = payload.get("session")
+        if not session:
+            raise Exception("Empty session returned")
+        self.session_id = session
+        return session
 
     def get_outlook(self) -> Dict[str, SentimentSnapshot]:
         if not self.session_id:
             self.login()
         url = f"{BASE_URL}/get-community-outlook.json?session={urllib.parse.quote(self.session_id)}"
         payload = self._get_json(url)
-        result: Dict[str, SentimentSnapshot] = {}
-        for item in payload.get("symbols", []):
-            try:
-                symbol = str(item.get("symbol") or item.get("name")).upper()
-                long_pct = float(str(item.get("longPercentage")).replace("%",""))
-                short_pct = float(str(item.get("shortPercentage")).replace("%",""))
-                result[symbol] = SentimentSnapshot(symbol=symbol, long_pct=long_pct, short_pct=short_pct)
-            except: continue
-        return result
+        symbols = payload.get("symbols", [])
+        out = {}
+        for item in symbols:
+            symbol = item.get("symbol")
+            long_pct = float(item.get("longPercentage", 0))
+            short_pct = float(item.get("shortPercentage", 0))
+            out[symbol.upper()] = SentimentSnapshot(symbol.upper(), long_pct, short_pct)
+        return out
 
-    def _get_json(self, url):
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body or "{}")
+    def _get_json(self, url: str) -> dict:
+        req = urllib.request.Request(url, headers={"User-Agent": "python-requests"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
 
-# --- TELEGRAM ---
-def load_users():
-    if os.path.exists(CHAT_DB_FILE):
-        with open(CHAT_DB_FILE,"r") as f:
-            return json.load(f)
-    return {}
+# -------------------- TELEGRAM UTILS --------------------
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-def save_users(users):
-    with open(CHAT_DB_FILE,"w") as f:
-        json.dump(users,f)
+def send_message(chat_id: int, text: str):
+    url = f"{TELEGRAM_API}/sendMessage"
+    data = {"chat_id": chat_id, "text": text}
+    resp = requests.post(url, data=data)
+    if not resp.ok:
+        print(f"Errore invio Telegram: {resp.text}")
 
 def get_updates(offset=None):
-    params = {"timeout": 30}
-    if offset: params["offset"] = offset
-    url = f"{URL_TELEGRAM}/getUpdates?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=35) as resp:
-        return json.load(resp)
-
-def send_message(chat_id, text):
-    url = f"{URL_TELEGRAM}/sendMessage"
-    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode":"HTML"}).encode()
-    try:
-        with urllib.request.urlopen(url, data=data, timeout=10) as resp:
-            return resp.read()
-    except Exception as e:
-        print("Errore invio Telegram:", e)
-
-
-def get_updates(offset=None):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    params = {"timeout": 10, "offset": offset}
+    url = f"{TELEGRAM_API}/getUpdates"
+    params = {"timeout": 5, "offset": offset}
     resp = requests.get(url, params=params)
     return resp.json()
 
-# Ciclo per leggere i messaggi
-last_update_id = None
-updates = get_updates()
-for u in updates.get("result", []):
-    update_id = u["update_id"]
-    if last_update_id and update_id <= last_update_id:
-        continue
-    text = u["message"]["text"]
-    chat_id = u["message"]["chat"]["id"]
-    # parsing comandi qui
+# -------------------- COMANDI TELEGRAM --------------------
+def handle_command(chat_id: int, text: str):
+    text = text.strip()
     if text.startswith("/pairs"):
-        send_pairs(chat_id)
+        msg = "\n".join(f"{p} {PAIR_FLAGS.get(p,'')}" for p in PAIR_FLAGS)
+        send_message(chat_id, msg)
     elif text.startswith("/add"):
-        param = text.split(" ")[1]
-        add_pair(chat_id, param)
-    # ...
-    last_update_id = update_id + 1
+        parts = text.split()
+        if len(parts) < 2:
+            send_message(chat_id, "Usa /add PAIR, es: /add EURUSD")
+            return
+        pair = parts[1].upper()
+        if pair not in PAIR_FLAGS:
+            send_message(chat_id, f"Pair non valido: {pair}")
+            return
+        USER_PAIRS.setdefault(chat_id, [])
+        if pair not in USER_PAIRS[chat_id]:
+            USER_PAIRS[chat_id].append(pair)
+        send_message(chat_id, f"Aggiunto {pair}")
+    elif text.startswith("/remove"):
+        parts = text.split()
+        if len(parts) < 2:
+            send_message(chat_id, "Usa /remove PAIR, es: /remove EURUSD")
+            return
+        pair = parts[1].upper()
+        USER_PAIRS.setdefault(chat_id, [])
+        if pair in USER_PAIRS[chat_id]:
+            USER_PAIRS[chat_id].remove(pair)
+            send_message(chat_id, f"Rimosso {pair}")
+        else:
+            send_message(chat_id, f"{pair} non presente nella tua lista")
+    elif text.startswith("/mylist"):
+        pairs = USER_PAIRS.get(chat_id, [])
+        if not pairs:
+            send_message(chat_id, "La tua lista è vuota")
+        else:
+            msg = "\n".join(f"{p} {PAIR_FLAGS.get(p,'')}" for p in pairs)
+            send_message(chat_id, msg)
+    else:
+        send_message(chat_id, "Usa /pairs, /add, /remove, /mylist")
 
-
-# --- UTILS ---
-def classify_state(s: SentimentSnapshot, threshold=DEFAULT_THRESHOLD):
-    long_ok = s.long_pct >= threshold
-    short_ok = s.short_pct >= threshold
-    if long_ok and short_ok: return "BOTH"
-    if long_ok: return "LONG"
-    if short_ok: return "SHORT"
+# -------------------- LOGICA ALERT --------------------
+def classify_state(s: SentimentSnapshot, threshold: float) -> str:
+    if s.long_pct >= threshold and s.short_pct >= threshold:
+        return "BOTH"
+    if s.long_pct >= threshold:
+        return "LONG"
+    if s.short_pct >= threshold:
+        return "SHORT"
     return "NONE"
 
-def state_action(state: str):
+def state_action(state: str) -> str:
     return {"LONG":"SELL (crowded LONG)","SHORT":"BUY (crowded SHORT)","BOTH":"CHECK (both sides >= threshold)","NONE":""}.get(state,"")
 
-def now_stamp():
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
-# --- MAIN ---
+# -------------------- MAIN --------------------
 def main():
-    if not TELEGRAM_TOKEN or not MYFXBOOK_EMAIL or not MYFXBOOK_PASSWORD:
-        print("Imposta TELEGRAM_TOKEN, MYFXBOOK_EMAIL, MYFXBOOK_PASSWORD")
+    print("Bot Myfxbook + Telegram")
+
+    # 1) Poll messaggi Telegram
+    last_update_id = None
+    updates = get_updates()
+    for u in updates.get("result", []):
+        update_id = u["update_id"]
+        if last_update_id and update_id <= last_update_id:
+            continue
+        last_update_id = update_id
+        msg = u.get("message", {})
+        chat_id = msg.get("chat", {}).get("id")
+        text = msg.get("text", "")
+        if chat_id and text:
+            handle_command(chat_id, text)
+
+    # 2) Controllo sentiment Myfxbook
+    client = MyfxbookClient(MYFXBOOK_EMAIL, MYFXBOOK_PASSWORD)
+    try:
+        sentiments = client.get_outlook()
+    except Exception as e:
+        print(f"Errore Myfxbook: {e}")
         return
 
-    users = load_users()  # dict chat_id -> [pair,...]
-    client = MyfxbookClient(MYFXBOOK_EMAIL, MYFXBOOK_PASSWORD)
-    last_state: Dict[str,str] = {}
-    last_update_id = None
+    # 3) Invia alert agli utenti
+    threshold = DEFAULT_THRESHOLD
+    for chat_id, pairs in USER_PAIRS.items():
+        for pair in pairs:
+            s = sentiments.get(pair)
+            if not s:
+                continue
+            state = classify_state(s, threshold)
+            if state != "NONE":
+                msg = f"ALERT {pair}: {s.long_pct:.1f}% long / {s.short_pct:.1f}% short -> {state_action(state)}"
+                send_message(chat_id, msg)
 
-    try:
-        while True:
-            stamp = now_stamp()
-            # --- Legge messaggi Telegram ---
-            try:
-                updates = get_updates(last_update_id)
-                for u in updates.get("result", []):
-                    last_update_id = u["update_id"] + 1
-                    chat_id = str(u["message"]["chat"]["id"])
-                    text = u["message"]["text"].strip()
-
-                    if chat_id not in users:
-                        users[chat_id] = []
-
-                    # Comandi
-                    if text.startswith("/"):
-                        parts = text.split()
-                        cmd = parts[0].lower()
-                        arg = parts[1].upper() if len(parts)>1 else None
-
-                        if cmd=="/start":
-                            send_message(chat_id, "Benvenuto! Usa /pairs per vedere tutti i pair disponibili.")
-                        elif cmd=="/pairs":
-                            try:
-                                sentiments = client.get_outlook()
-                                msg = "Tutti i pair disponibili:\n"
-                                for p in sentiments.keys():
-                                    msg += f"{p} {pair_flags(p)}\n"
-                                send_message(chat_id, msg)
-                            except: send_message(chat_id, "Errore lettura pair Myfxbook")
-                        elif cmd=="/add" and arg:
-                            if arg not in users[chat_id]:
-                                users[chat_id].append(arg)
-                                save_users(users)
-                                send_message(chat_id, f"{arg} aggiunto {pair_flags(arg)}")
-                        elif cmd=="/remove" and arg:
-                            if arg in users[chat_id]:
-                                users[chat_id].remove(arg)
-                                save_users(users)
-                                send_message(chat_id, f"{arg} rimosso {pair_flags(arg)}")
-                        elif cmd=="/mylist":
-                            msg = "I tuoi pair monitorati:\n" + "\n".join([f"{p} {pair_flags(p)}" for p in users.get(chat_id,[])])
-                            send_message(chat_id, msg)
-                        continue
-                    # Risposta generica
-                    send_message(chat_id, f"Hai scritto: {text}\nUsa /pairs, /add, /remove, /mylist")
-            except Exception as e:
-                print(f"{stamp} Telegram fetch error: {e}")
-
-            # --- Legge sentiment Myfxbook ---
-            try:
-                sentiments = client.get_outlook()
-                for uid, user_pairs in users.items():
-                    msg = ""
-                    for sym, snap in sentiments.items():
-                        if sym not in user_pairs: continue
-                        state = classify_state(snap)
-                        prev = last_state.get(f"{uid}_{sym}", "NONE")
-                        last_state[f"{uid}_{sym}"] = state
-                        if state != "NONE" and state != prev:
-                            msg += f"{sym} {pair_flags(sym)}: long={snap.long_pct}% short={snap.short_pct}% → {state_action(state)}\n"
-                    if msg:
-                        send_message(uid, f"📊 <b>Myfxbook Alert</b>\n{stamp}\n\n{msg}")
-                print(f"{stamp} Check completato")
-            except Exception as e:
-                print(f"{stamp} Myfxbook error: {e}")
-
-            if ONE_SHOT:
-                break
-            time.sleep(15*60)
-    finally:
-        client.logout()
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
