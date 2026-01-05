@@ -1,69 +1,120 @@
+#!/usr/bin/env python3
 import requests
+import re
 import json
-import os
+import time
 from datetime import datetime
+import os
 
-# URL Myfxbook
-MYFXBOOK_URL = "https://www.myfxbook.com/api/get-community-outlook.json"
-THRESHOLD = 65
+# Telegram bot token e chat ID dai GitHub Secrets
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Prendere i secrets da GitHub Actions
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Soglia percentuale per alert
+THRESHOLD = 65.0
 
-# Funzioni per leggere i pair
-def load_pairs():
-    try:
-        with open("pairs.json", "r") as f:
-            return json.load(f).get("pairs", [])
-    except Exception as e:
-        print("Errore nel leggere pairs.json:", e)
-        return []
+# Coppie da monitorare
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY"]  # puoi aggiungere altre
 
-# Funzione per inviare messaggio Telegram
-def send_telegram(msg):
+# Intervallo in secondi tra controlli (es. 15 minuti)
+INTERVAL_SECONDS = 15 * 60
+
+# URL della pagina Myfxbook Community Outlook
+MYFXBOOK_URL = "https://www.myfxbook.com/community/outlook"
+
+
+def fetch_sentiment():
+    """Scarica e restituisce i dati sentiment come dict {pair: {"long": float, "short": float}}"""
+    r = requests.get(MYFXBOOK_URL, headers={"User-Agent": "Mozilla/5.0"})
+    html = r.text
+
+    # Cerca JSON dei dati community
+    match = re.search(r"var communityData = (\{.*\});", html)
+    if not match:
+        print("Errore: impossibile trovare i dati sentiment nella pagina")
+        return {}
+
+    data = json.loads(match.group(1))
+    result = {}
+    for pair in PAIRS:
+        if pair in data:
+            result[pair] = {
+                "long": float(data[pair]["longPercentage"]),
+                "short": float(data[pair]["shortPercentage"]),
+            }
+        else:
+            print(f"Pair {pair} non trovato nella pagina Myfxbook")
+    return result
+
+
+def send_telegram_message(message: str):
+    """Invia messaggio Telegram usando bot"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML"
-    })
-    print("Telegram response:", r.text)  # utile per debug GitHub
-
-# Funzione principale
-def check_sentiment():
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        r = requests.get(MYFXBOOK_URL, timeout=10)
-        data = r.json()
+        r = requests.post(url, data=payload, timeout=10)
+        if r.status_code != 200:
+            print("Errore invio Telegram:", r.text)
     except Exception as e:
-        print("Errore nel leggere Myfxbook:", e)
-        return
+        print("Errore invio Telegram:", e)
 
-    pairs = load_pairs()
-    if not pairs:
-        print("Nessun pair da controllare.")
-        return
 
-    for pair in pairs:
-        if pair not in data:
-            print(f"Pair {pair} non trovato in Myfxbook")
-            continue
+def classify_state(long_pct, short_pct, threshold=THRESHOLD):
+    """Restituisce LONG, SHORT o NONE"""
+    if long_pct >= threshold and short_pct >= threshold:
+        return "BOTH"
+    elif long_pct >= threshold:
+        return "LONG"
+    elif short_pct >= threshold:
+        return "SHORT"
+    else:
+        return "NONE"
 
-        long_p = data[pair].get("longPercentage", 0)
-        short_p = data[pair].get("shortPercentage", 0)
 
-        # Alert solo se supera la soglia
-        if long_p >= THRESHOLD or short_p >= THRESHOLD:
-            direction = "BUY" if long_p >= THRESHOLD else "SELL"
-            value = long_p if direction == "BUY" else short_p
+def main():
+    last_state = {}  # tiene traccia dello stato precedente per ogni pair
 
-            msg = (
-                f"📊 <b>{pair}</b>\n"
-                f"Direzione: <b>{direction}</b>\n"
-                f"Sentiment: <b>{value:.1f}%</b>\n"
-                f"Ora: {datetime.utcnow().strftime('%H:%M UTC')}"
-            )
-            send_telegram(msg)
+    while True:
+        stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            sentiments = fetch_sentiment()
+            alerts = []
+
+            for pair, values in sentiments.items():
+                long_pct = values["long"]
+                short_pct = values["short"]
+                state = classify_state(long_pct, short_pct)
+                prev = last_state.get(pair, "NONE")
+                last_state[pair] = state
+
+                # alert solo se entra nella soglia o cambia lato
+                if state != "NONE" and state != prev:
+                    alerts.append((pair, long_pct, short_pct, state, prev))
+
+            if alerts:
+                message = f"📊 <b>Myfxbook Alert</b>\nOra: {stamp}\n\n"
+                for pair, lp, sp, cur, prev in alerts:
+                    if prev == "NONE":
+                        reason = "ENTRY"
+                    else:
+                        reason = f"FLIP {prev}→{cur}"
+                    action = ""
+                    if cur == "LONG":
+                        action = "SELL (crowded LONG)"
+                    elif cur == "SHORT":
+                        action = "BUY (crowded SHORT)"
+                    elif cur == "BOTH":
+                        action = "CHECK (both sides >= threshold)"
+                    message += f"{pair}: long={lp:.1f}% short={sp:.1f}% → {action} [{reason}]\n"
+                send_telegram_message(message)
+            else:
+                print(f"{stamp} Nessun nuovo alert")
+
+        except Exception as e:
+            print(f"{stamp} ERRORE: {e}")
+
+        time.sleep(INTERVAL_SECONDS)
+
 
 if __name__ == "__main__":
-    check_sentiment()
+    main()
