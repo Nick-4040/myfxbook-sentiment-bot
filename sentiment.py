@@ -7,14 +7,11 @@ from datetime import datetime
 import os
 
 # Telegram bot token e chat ID dai GitHub Secrets
-TELEGRAM_TOKEN = "8365209009:AAHGH80VkAO0u_ro54m2SpfsxsMe2Ls2vFs"
-TELEGRAM_CHAT_ID = 263249303
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # Soglia percentuale per alert
 THRESHOLD = 65.0
-
-# Coppie da monitorare
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY"]  # puoi aggiungere altre
 
 # Intervallo in secondi tra controlli (es. 15 minuti)
 INTERVAL_SECONDS = 15 * 60
@@ -36,14 +33,14 @@ def fetch_sentiment():
 
     data = json.loads(match.group(1))
     result = {}
-    for pair in PAIRS:
-        if pair in data:
+    for pair, values in data.items():
+        try:
             result[pair] = {
-                "long": float(data[pair]["longPercentage"]),
-                "short": float(data[pair]["shortPercentage"]),
+                "long": float(values["longPercentage"]),
+                "short": float(values["shortPercentage"]),
             }
-        else:
-            print(f"Pair {pair} non trovato nella pagina Myfxbook")
+        except (KeyError, ValueError):
+            continue
     return result
 
 
@@ -60,7 +57,7 @@ def send_telegram_message(message: str):
 
 
 def classify_state(long_pct, short_pct, threshold=THRESHOLD):
-    """Restituisce LONG, SHORT o NONE"""
+    """Restituisce LONG, SHORT, BOTH o NONE"""
     if long_pct >= threshold and short_pct >= threshold:
         return "BOTH"
     elif long_pct >= threshold:
@@ -78,6 +75,11 @@ def main():
         stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         try:
             sentiments = fetch_sentiment()
+            if not sentiments:
+                print(f"{stamp} Nessun dato trovato")
+                time.sleep(INTERVAL_SECONDS)
+                continue
+
             alerts = []
 
             for pair, values in sentiments.items():
