@@ -7,8 +7,8 @@ from datetime import datetime
 import os
 
 # Telegram bot token e chat ID dai GitHub Secrets
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = 8365209009:AAHGH80VkAO0u_ro54m2SpfsxsMe2Ls2vFs
+TELEGRAM_CHAT_ID = 263249303
 
 # Soglia percentuale per alert
 THRESHOLD = 65.0
