@@ -5,11 +5,11 @@ from datetime import datetime
 MYFXBOOK_URL = "https://www.myfxbook.com/api/get-community-outlook.json"
 THRESHOLD = 65
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("8365209009:AAHGH80VkAO0u_ro54m2SpfsxsMe2Ls2vFs")
+CHAT_ID = os.getenv("263249303")
 
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{8365209009:AAHGH80VkAO0u_ro54m2SpfsxsMe2Ls2vFs}/sendMessage"
     requests.post(url, json={
         "chat_id": CHAT_ID,
         "text": msg
