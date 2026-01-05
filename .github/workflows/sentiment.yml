@@ -2,22 +2,22 @@ name: Myfxbook Sentiment Bot
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch:
+    - cron: '*/15 * * * *'  # ogni 15 minuti
+  workflow_dispatch:  # permette run manuale
 
 jobs:
-  run:
+  run-sentiment:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
-      - uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-
-      - run: pip install -r requirements.txt
-
-      - run: python sentiment.py
+          python-version: 3.11
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run sentiment bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python sentiment.py
