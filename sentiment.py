@@ -9,6 +9,7 @@ import json
 import time
 import urllib.request
 import urllib.parse
+import requests
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
@@ -114,6 +115,32 @@ def send_message(chat_id, text):
             return resp.read()
     except Exception as e:
         print("Errore invio Telegram:", e)
+
+
+def get_updates(offset=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"timeout": 10, "offset": offset}
+    resp = requests.get(url, params=params)
+    return resp.json()
+
+# Ciclo per leggere i messaggi
+last_update_id = None
+updates = get_updates()
+for u in updates.get("result", []):
+    update_id = u["update_id"]
+    if last_update_id and update_id <= last_update_id:
+        continue
+    text = u["message"]["text"]
+    chat_id = u["message"]["chat"]["id"]
+    # parsing comandi qui
+    if text.startswith("/pairs"):
+        send_pairs(chat_id)
+    elif text.startswith("/add"):
+        param = text.split(" ")[1]
+        add_pair(chat_id, param)
+    # ...
+    last_update_id = update_id + 1
+
 
 # --- UTILS ---
 def classify_state(s: SentimentSnapshot, threshold=DEFAULT_THRESHOLD):
