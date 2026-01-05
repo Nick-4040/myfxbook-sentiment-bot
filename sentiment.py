@@ -2,6 +2,10 @@ import requests
 import os
 from datetime import datetime
 
+print("TOKEN presente:", TELEGRAM_TOKEN is not None)
+print("CHAT ID:", CHAT_ID)
+
+
 MYFXBOOK_URL = "https://www.myfxbook.com/api/get-community-outlook.json"
 THRESHOLD = 65
 
