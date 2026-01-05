@@ -10,10 +10,13 @@ import os
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# Variabile per eseguire un solo ciclo su GitHub Actions
+ONE_SHOT = os.environ.get("ONE_SHOT", "false").lower() == "true"
+
 # Soglia percentuale per alert
 THRESHOLD = 65.0
 
-# Intervallo in secondi tra controlli (es. 15 minuti)
+# Intervallo in secondi tra controlli (utile in locale)
 INTERVAL_SECONDS = 15 * 60
 
 # URL della pagina Myfxbook Community Outlook
@@ -22,8 +25,12 @@ MYFXBOOK_URL = "https://www.myfxbook.com/community/outlook"
 
 def fetch_sentiment():
     """Scarica e restituisce i dati sentiment come dict {pair: {"long": float, "short": float}}"""
-    r = requests.get(MYFXBOOK_URL, headers={"User-Agent": "Mozilla/5.0"})
-    html = r.text
+    try:
+        r = requests.get(MYFXBOOK_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        html = r.text
+    except Exception as e:
+        print("Errore fetch pagina:", e)
+        return {}
 
     # Cerca JSON dei dati community
     match = re.search(r"var communityData = (\{.*\});", html)
@@ -31,7 +38,12 @@ def fetch_sentiment():
         print("Errore: impossibile trovare i dati sentiment nella pagina")
         return {}
 
-    data = json.loads(match.group(1))
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError as e:
+        print("Errore parsing JSON:", e)
+        return {}
+
     result = {}
     for pair, values in data.items():
         try:
@@ -46,6 +58,10 @@ def fetch_sentiment():
 
 def send_telegram_message(message: str):
     """Invia messaggio Telegram usando bot"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram token o chat ID mancanti")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
@@ -77,6 +93,8 @@ def main():
             sentiments = fetch_sentiment()
             if not sentiments:
                 print(f"{stamp} Nessun dato trovato")
+                if ONE_SHOT:
+                    break
                 time.sleep(INTERVAL_SECONDS)
                 continue
 
@@ -96,10 +114,7 @@ def main():
             if alerts:
                 message = f"📊 <b>Myfxbook Alert</b>\nOra: {stamp}\n\n"
                 for pair, lp, sp, cur, prev in alerts:
-                    if prev == "NONE":
-                        reason = "ENTRY"
-                    else:
-                        reason = f"FLIP {prev}→{cur}"
+                    reason = "ENTRY" if prev == "NONE" else f"FLIP {prev}→{cur}"
                     action = ""
                     if cur == "LONG":
                         action = "SELL (crowded LONG)"
@@ -115,6 +130,8 @@ def main():
         except Exception as e:
             print(f"{stamp} ERRORE: {e}")
 
+        if ONE_SHOT:
+            break  # esce subito dopo un ciclo
         time.sleep(INTERVAL_SECONDS)
 
 
