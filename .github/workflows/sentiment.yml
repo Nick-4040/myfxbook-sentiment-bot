@@ -1,5 +1,6 @@
 name: Myfxbook Sentiment Bot
 
+# Trigger ogni 15 minuti e manualmente
 on:
   schedule:
     - cron: '*/15 * * * *'
@@ -9,18 +10,21 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: 3.11
-      - name: Install requests
+
+      - name: Install dependencies
         run: pip install requests
+
       - name: Run Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MYFXBOOK_EMAIL: ${{ secrets.MYFXBOOK_EMAIL }}
           MYFXBOOK_PASSWORD: ${{ secrets.MYFXBOOK_PASSWORD }}
-          ONE_SHOT: ${{ secrets.ONE_SHOT }}
+          ONE_SHOT: true  # true = esegue una volta sola e termina
         run: python sentiment.py
